@@ -1,0 +1,28 @@
+(function(root){
+'use strict';
+function compare(source,target,excludedIds=[]){
+ if(!Array.isArray(source)||!Array.isArray(target)||!Array.isArray(excludedIds))throw new Error('Source, target and exclusions must be arrays.');
+ if(source.length>25000||target.length>25000)throw new Error('Use snapshots of at most 25,000 records per side.');
+ function validate(rows,label){rows.forEach((r,i)=>{if(!r||typeof r!=='object'||Array.isArray(r)||typeof r.source_id!=='string'||!r.source_id.trim()||r.source_id.length>160)throw new Error(label+' row '+(i+1)+': source_id must be a nonempty string of at most 160 characters.');if(typeof r.email_opt_in!=='boolean'||typeof r.sms_opt_in!=='boolean')throw new Error(label+' row '+(i+1)+': opt-in fields must be true or false, not strings or missing values.');if(r.company_id!==null&&(typeof r.company_id!=='string'||!r.company_id.trim()))throw new Error(label+' row '+(i+1)+': company_id must be a nonempty string or null.');});}
+ validate(source,'Source');validate(target,'Target');if(excludedIds.some(x=>typeof x!=='string'||!x.trim()))throw new Error('Every excluded source ID must be a nonempty string.');
+ const excluded=new Set(excludedIds),s=new Map(),t=new Map(),issues=[];const add=(id,type,expected,actual)=>issues.push({source_id:id,type,expected,actual});
+ function index(rows,map){for(const r of rows){const items=map.get(r.source_id)||[];items.push(r);map.set(r.source_id,items);}}
+ index(source,s);index(target,t);
+ for(const [id,rows] of s)if(rows.length>1)add(id,'duplicate_source_id',1,rows.length);
+ for(const [id,rows] of t)if(rows.length>1)add(id,'duplicate_target_source_id',1,rows.length);
+ let matched=0,excludedCount=0;
+ for(const id of excluded)if(!s.has(id))add(id,'unknown_exclusion','ID present in source','not found');
+ for(const [id,rows] of s){if(excluded.has(id)){excludedCount++;if(t.has(id))add(id,'excluded_record_present','absent from target',t.get(id).length);continue;}if(rows.length!==1)continue;const candidates=t.get(id);if(!candidates){add(id,'missing_target','one target record','not found');continue;}if(candidates.length!==1)continue;matched++;const a=rows[0],b=candidates[0];for(const key of ['company_id','email_opt_in','sms_opt_in'])if(a[key]!==b[key])add(id,key+'_mismatch',a[key],b[key]);}
+ for(const id of t.keys())if(!s.has(id))add(id,'unexpected_target','ID present in source','not found');
+ return {schema_version:1,source_records:source.length,target_records:target.length,matched_unique_ids:matched,explicitly_excluded_ids:excludedCount,exception_count:issues.length,issues,scope:'Point-in-time comparison only. A difference requires adjudication; no system is modified.'};
+}
+const sample={source:[{source_id:'A',company_id:'CO-1',email_opt_in:false,sms_opt_in:false},{source_id:'B',company_id:'CO-2',email_opt_in:true,sms_opt_in:false},{source_id:'C',company_id:null,email_opt_in:false,sms_opt_in:true},{source_id:'D',company_id:'CO-4',email_opt_in:false,sms_opt_in:false}],target:[{source_id:'A',company_id:'CO-1',email_opt_in:true,sms_opt_in:false},{source_id:'B',company_id:'CO-9',email_opt_in:true,sms_opt_in:false},{source_id:'X',company_id:null,email_opt_in:false,sms_opt_in:false}],exclusions:['D']};
+if(typeof module!=='undefined'&&module.exports)module.exports={compare,sample};
+if(typeof document==='undefined')return;
+const $=id=>document.getElementById(id);let last=null;
+function load(){ $('source').value=JSON.stringify(sample.source,null,2);$('target').value=JSON.stringify(sample.target,null,2);$('excluded').value=JSON.stringify(sample.exclusions);$('status').textContent='Synthetic example loaded. Choose Compare snapshots.';$('results').hidden=true;last=null;}
+$('sample').addEventListener('click',load);
+$('compare').addEventListener('click',()=>{try{const a=$('source').value,b=$('target').value;if(a.length>12000000||b.length>12000000)throw new Error('Snapshot text is too large. Use up to 12 MB per side.');last=compare(JSON.parse(a),JSON.parse(b),JSON.parse($('excluded').value||'[]'));$('summary').textContent=last.source_records+' source rows / '+last.target_records+' target rows / '+last.matched_unique_ids+' unique ID matches / '+last.explicitly_excluded_ids+' explicit exclusions';$('rows').replaceChildren();for(const issue of last.issues){const tr=document.createElement('tr');for(const value of [issue.source_id,({email_opt_in_mismatch:'Email opt-in differs',sms_opt_in_mismatch:'SMS opt-in differs',company_id_mismatch:'Company association differs',missing_target:'Missing target record',unexpected_target:'Unexpected target record',duplicate_source_id:'Duplicate source ID',duplicate_target_source_id:'Duplicate source ID in target',excluded_record_present:'Excluded record still present',unknown_exclusion:'Unknown excluded ID'})[issue.type]||issue.type,issue.expected,issue.actual]){const td=document.createElement('td');td.textContent=value===null?'null':String(value);tr.appendChild(td);}$('rows').appendChild(tr);}$('results').hidden=false;$('status').textContent=last.exception_count?last.exception_count+' exceptions require review.':'No differences found in the checked fields. Complete the remaining cutover checks below.';}catch(e){last=null;$('results').hidden=true;$('status').textContent='Input not compared: '+e.message;}});
+$('download').addEventListener('click',()=>{if(!last)return;const url=URL.createObjectURL(new Blob([JSON.stringify(last,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='crm-cutover-exceptions.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
+load();
+})(typeof globalThis==='undefined'?this:globalThis);
